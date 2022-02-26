@@ -298,4 +298,142 @@ def extract_sentiment_score(text):
     return subjectivity, sentiment_label(polairty),  polairty,  subject_label(subjectivity) 
 
 # extract_sentiment_score(text = example_txt)
- 
+
+
+#######################################################
+#### Preprocess Video Transcript words to Sentences aggregated by timestamp
+#######################################################
+
+timestamp_texts_sentences = pd.read_csv("Targeted_Output/Phase1/0_raw_audio_word_timestamp.csv")
+
+# replace all NAN value with empty space ""
+timestamp_texts_sentences = timestamp_texts_sentences.fillna('')
+
+timestamp_texts_sentences.head()
+
+# Function1: generate_words_level_timstamps
+# toakenize words in each time stamped sentences
+# based on the time stamp interval divide by the number of words to assign time stamp to each words
+# extend the word list and their corresponded assigned time stamp
+
+def generate_words_level_timstamps(clip_nm, timestamp_texts_sentences_sub_df  ):
+    space_time = 0
+#     clip_nm = "3_insects_intro_ant_v"
+    clip_level_extention_df = pd.DataFrame()
+    example = timestamp_texts_sentences_sub_df[timestamp_texts_sentences_sub_df['video_file'] == clip_nm]
+    audio_source = example.audio_source.values[0]
+    if example['raw_txt'].values[0] != "":
+        wrd_tokens = nltk.word_tokenize(text_cleaning_sub(example['raw_txt'].values[0].replace("'", "")))
+        base = example['start sec'].values[0]
+        ceil = example['end sec'].values[0]
+        total_interval_sec = ceil - base 
+
+        uniform_interval = total_interval_sec/len(wrd_tokens)
+        assigned_tmstmps = []
+        for i in range(1, len(wrd_tokens) + 1):
+            uniform_interval_new = uniform_interval * i 
+            new_tmstmp =  uniform_interval_new + base
+            assigned_tmstmps.append(new_tmstmp)
+
+        clip_level_extention_df['words'] = wrd_tokens
+        clip_level_extention_df['word_level_timstamp'] = assigned_tmstmps
+
+        clip_level_extention_df['clip_file'] = clip_nm
+        clip_level_extention_df['clip_extraction'] = example['raw_txt'].values[0]
+        clip_level_extention_df['audio_source'] = audio_source
+        clip_level_extention_df['word_level_timstamp_min'] = np.round(clip_level_extention_df['word_level_timstamp']/60, 4)
+
+    else: # mean the transcript is there for extraction
+        pass
+    
+    return clip_level_extention_df.reset_index(drop = True)
+
+
+# loop this functions to each audio file timestamped extracted clips
+words_timestamps_df = pd.DataFrame()
+splited_clip_level = list(timestamp_texts_sentences.video_file)
+for i in splited_clip_level:
+    
+    words_timestamps_df_temp = generate_words_level_timstamps(clip_nm  = i, timestamp_texts_sentences_sub_df = timestamp_texts_sentences )
+    words_timestamps_df = pd.concat([words_timestamps_df,words_timestamps_df_temp ], axis = 0)
+words_timestamps_df = words_timestamps_df.reset_index(drop = True)
+
+# save to csv
+words_timestamps_df.to_csv("Targeted_Output/Phase2/1_words_timestamps_df.csv", index = None)
+
+
+# Function2 aggregate_sentences_timestamps: 
+# logics to aggregate words into tokenized sentences:
+    
+# 1. tokenized each sentences into words and count the tokenizd word in each sentences as setnce_wrd_cnt
+# 2. we use the length of tokenzied words (wrd_cnt) from each sentences to decide the number of sample of timestamped words when we are looping to capcture each words time stamp to form time range
+
+audio_texts = pd.read_csv("Targeted_Output/Phase1/0_raw_audio_rawtxt.csv")
+# audio_texts.head()
+
+
+def aggregate_sentences_timestamps(txt, words_timestamps_df_temp, audio_source ):
+   
+    preprocessed_audio = text_cleaning(txt = txt, stop_words= stop_words )
+    preprocessed_sentences_tokens = preprocessed_audio[3]
+    preprocessed_word_sentences_tokens = preprocessed_audio[4]
+    
+    res = []
+    sentences_index = []
+    tokenized_sentences = []
+    for i in range(len(preprocessed_word_sentences_tokens)):
+
+        sentences_index =  sentences_index + [i] * len(preprocessed_word_sentences_tokens[i])
+        res = res + preprocessed_word_sentences_tokens[i]
+        tokenized_sentences = tokenized_sentences + [preprocessed_sentences_tokens[i]] *  len(preprocessed_word_sentences_tokens[i])
+
+    
+    whole_text_df = pd.DataFrame()
+
+    whole_text_df["tokeized_words"] = res
+    whole_text_df["sentences_index"] = sentences_index
+    whole_text_df["tokenized_sentences"] = tokenized_sentences
+
+    diff = list(set(list(whole_text_df['tokeized_words'])) - set(list(words_timestamps_df_temp.words)))
+
+    smple = len(list(whole_text_df['tokeized_words']))- len(list(words_timestamps_df_temp.words))
+
+    # based on the number of word gaps, we randomly sample from the word that is within the diff words list
+    random_sample_remove = whole_text_df[whole_text_df.tokeized_words.isin(diff)].sample(smple)
+
+    # then we can delete all those ranodmy sampled rows and then reassign the indexes
+    whole_text_df = whole_text_df.drop(random_sample_remove.index)
+
+    # after we  remove all those samples ==> we can have the same rows count as words_timestamps_df_temp to join later
+    whole_text_df = whole_text_df.reset_index(drop = True)
+    
+    # merge tokenized sentecnes level tokenized words with the words with timestamp
+    sentences_timestamps_df = pd.merge(whole_text_df, words_timestamps_df_temp, left_index=True, right_index=True)
+    
+    # get the min and max timestamp under each sentences ==> timestamtp range for each tokenized sentences
+    sentences_timestamps_df_res = sentences_timestamps_df.groupby(by = "tokenized_sentences").agg(
+        sentence_level_timstamp_min_sec=pd.NamedAgg(column="word_level_timstamp", aggfunc="min"),
+        sentence_level_timstamp_max_sec=pd.NamedAgg(column="word_level_timstamp", aggfunc="max"),
+        sentence_level_timstamp_min_minute=pd.NamedAgg(column="word_level_timstamp_min", aggfunc="min"),
+        sentence_level_timstamp_max_minute=pd.NamedAgg(column="word_level_timstamp_min", aggfunc="max")
+    ).reset_index()
+    
+    sentences_timestamps_df_res["audio_source"] = audio_source
+    
+    sentences_timestamps_df_res = sentences_timestamps_df_res.sort_values(by ='sentence_level_timstamp_min_sec').reset_index(drop= True)
+    
+    return sentences_timestamps_df_res
+
+
+# loop the function above to genrate aggreagted time range for each tokenzied sentecnes
+audio_sentences_timestamp_df = pd.DataFrame()
+sources = list(audio_texts.video_file)
+for i in range(0,len(sources) ):
+    
+    audio_sentences_timestamp_temp = aggregate_sentences_timestamps(txt = audio_texts["raw_txt"][i] , words_timestamps_df_temp = words_timestamps_df[words_timestamps_df['audio_source']==sources[i]].reset_index(drop=True), audio_source = sources[i] )
+    
+    audio_sentences_timestamp_df = pd.concat([audio_sentences_timestamp_df, audio_sentences_timestamp_temp], axis = 0)
+
+
+# save to csv
+# audio_sentences_timestamp_df.to_csv("Targeted_Output/Phase2/1_audio_sentences_timestamp_df.csv", index = None)
